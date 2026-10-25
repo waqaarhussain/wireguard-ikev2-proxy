@@ -12,10 +12,10 @@ Each client is assigned to one proxy exit. The VPS accepts the encrypted client 
 - Per-proxy sing-box TUN interfaces
 - Per-client policy routing
 - Apple-compatible certificate profiles
-- QR codes and WireGuard configuration files
+- WireGuard configuration files
 - Proxy benchmarking
 - Automatic route rebuilding every three minutes
-- Optional temporary HTTP profile delivery on TCP port `8080`
+- Automatic short Apple profile links on TCP port `8080`
 
 ## Supported proxy exits
 
@@ -77,10 +77,10 @@ sudo new
 Choose the proxy exit and enter a client name. The helper creates:
 
 - A WireGuard `.conf` file
-- A WireGuard QR code
 - An IKEv2 client certificate
 - A password-protected PKCS#12 certificate
 - An Apple `.mobileconfig` profile
+- A short Apple TV installation link
 - WireGuard and IKEv2 source-routing entries for the selected proxy
 
 Client files are stored in:
@@ -91,43 +91,40 @@ Client files are stored in:
 
 ## Apple TV and Apple profile installation
 
-List short profile links:
+The `new` command automatically copies the generated `.mobileconfig` file into a dedicated download directory, starts the restricted profile server and prints a short link such as:
 
-```bash
-sudo apple-tv
+```text
+http://SERVER-IP:8080/p1.mobileconfig
 ```
 
-This copies generated `.mobileconfig` files into `/Wireguard/public` and serves only that directory on TCP port `8080`.
+No separate `apple-tv` command is needed. Open the printed link on the Apple device that needs the profile.
 
 The profile contains a client private certificate and its import password. The link uses plain HTTP and is publicly reachable while the service is running. Install the profile, then stop the profile server:
 
 ```bash
-sudo systemctl disable --now wg-http
-sudo find /Wireguard/public -maxdepth 1 -type f -name '*.mobileconfig' -delete
+sudo systemctl stop wg-http
 ```
 
-To use the links again:
+The published profile remains in `/var/lib/wireguard-proxy-public`. To use the same link again:
 
 ```bash
-sudo systemctl enable --now wg-http
-sudo apple-tv
+sudo systemctl start wg-http
 ```
+
+Removing a client through `manage` also removes its published profile.
 
 ## Helper commands
 
+Only four public commands are installed:
+
 | Command | Purpose |
 | --- | --- |
-| `add` | Add an HTTP, SOCKS5 or Shadowsocks proxy exit |
-| `new` | Create matching WireGuard and IKEv2 client profiles |
-| `edit` | Edit an existing proxy exit |
-| `remove` | Remove a client, its peer, IKEv2 identity and route mappings |
-| `check` | List WireGuard clients and mark recent handshakes |
+| `add` | Add an HTTP, SOCKS5 or Shadowsocks proxy exit, with an option to create a client immediately |
+| `new` | Create WireGuard and Apple IKEv2 client profiles, apply proxy routing and print the Apple TV link |
+| `manage` | Edit a proxy, remove a client, check clients or manually reapply routes |
 | `bench` | Benchmark all exits or filter by proxy type |
-| `update` | Rebuild and apply local route mappings |
-| `apple-tv` | Publish short Apple profile links |
-| `helpers` | Open an interactive helper menu |
 
-The `update` helper refreshes local routing. It does not download updates from GitHub.
+Route building, profile publishing and the three-minute refresh timer run internally and do not add extra user commands.
 
 ## Benchmarking
 
@@ -175,9 +172,9 @@ TCP port `8080` is optional after Apple profiles have been installed.
 | `/Wireguard/maps/client_map.db` | WireGuard client-to-exit mappings |
 | `/Wireguard/maps/ikev2_map.db` | IKEv2 client-to-exit mappings |
 | `/Wireguard/ikev2` | IKEv2 CA, server certificate and client assets |
-| `/Wireguard/public` | Profiles intentionally exposed by `wg-http` |
+| `/var/lib/wireguard-proxy-public` | Profiles intentionally exposed by `wg-http` |
 
-The top-level `/Wireguard` directory is root-only. Files copied into `/Wireguard/public` are deliberately made readable by the restricted HTTP service.
+The top-level `/Wireguard` directory is root-only. Only files copied into `/var/lib/wireguard-proxy-public` are readable by the restricted HTTP service.
 
 ## DNS behaviour
 
@@ -186,7 +183,7 @@ Client configurations do not contain a DNS setting. The connected device keeps i
 ## Security notes
 
 - Proxy credentials and generated private keys stay on the VPS.
-- The HTTP profile service runs as `www-data` and can access only the dedicated public profile directory.
+- The HTTP profile service runs as `www-data` and serves only `/var/lib/wireguard-proxy-public`.
 - Apple profiles contain sensitive client credentials. Do not leave TCP port `8080` open unnecessarily.
 - The profile server uses HTTP rather than HTTPS. Use it only for short-lived installation on a network you trust.
 - Back up `/Wireguard` before replacing or rebuilding the VPS.
