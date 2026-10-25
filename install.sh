@@ -90,6 +90,7 @@ cat >/usr/local/bin/apply-routing <<'APPLY'
 set -euo pipefail
 
 CLIENT_DB="/Wireguard/maps/client_map.db"
+IKE_DB="/Wireguard/maps/ikev2_map.db"
 EXITS_DB="/Wireguard/maps/exits.db"
 
 for prio in $(ip rule | awk -F: '{gsub(/ /,"",$1); print $1}' | grep -E '^(100[1-9]|10[1-9][0-9]|1[1-9][0-9]{2})$' || true); do
@@ -98,11 +99,13 @@ done
 
 ip rule add to 45.88.89.23 lookup main priority 50 2>/dev/null || true
 
-while IFS='|' read -r IP SLUG NAME; do
-  [ -n "${IP:-}" ] || continue
+apply_client_route() {
+  local IP="$1"
+  local SLUG="$2"
+  [ -n "${IP:-}" ] || return 0
 
   LINE="$(awk -F'|' -v s="$SLUG" '$1==s{print; exit}' "$EXITS_DB")"
-  [ -n "${LINE:-}" ] || continue
+  [ -n "${LINE:-}" ] || return 0
 
   IFS='|' read -r _ TYPE LABEL TUN TABLE <<< "$LINE"
 
@@ -115,7 +118,19 @@ while IFS='|' read -r IP SLUG NAME; do
 
   ip route replace default dev "$TUN" table "$TABLE" 2>/dev/null || true
   ip rule add from "$IP" table "$TABLE" priority "$TABLE" 2>/dev/null || true
+}
+
+while IFS='|' read -r IP SLUG NAME; do
+  [ -n "${IP:-}" ] || continue
+  apply_client_route "$IP" "$SLUG"
 done < "$CLIENT_DB"
+
+if [ -f "$IKE_DB" ]; then
+  while IFS='|' read -r IP SLUG NAME USERNAME; do
+    [ -n "${IP:-}" ] || continue
+    apply_client_route "$IP" "$SLUG"
+  done < "$IKE_DB"
+fi
 
 ip route flush cache
 APPLY
@@ -636,6 +651,7 @@ else
   systemctl restart wg-quick@wg0
 fi
 
+/usr/local/bin/new-ikev2-profile "$SLUG" "$FINAL" "$DIR"
 /usr/local/bin/apply-routing
 
 echo
@@ -644,6 +660,7 @@ echo "  $FINAL"
 echo "  $IP"
 echo "  $DIR/$FINAL.conf"
 echo "  $DIR/$FINAL.png"
+echo "  $DIR/$FINAL.mobileconfig"
 NEWCLIENT
 chmod +x /usr/local/bin/new-client
 
@@ -948,6 +965,7 @@ CLIENTS_DIR="$BASE/client"
 WG_CONF="/etc/wireguard/wg0.conf"
 MAP_DB="$BASE/maps/client_map.db"
 PEERS_DB="$BASE/maps/peers.db"
+IKE_MAP="$BASE/maps/ikev2_map.db"
 
 mapfile -d '' DIRS < <(find "$CLIENTS_DIR" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
 [ "${#DIRS[@]}" -gt 0 ] || { echo "No clients found."; exit 1; }
@@ -985,6 +1003,18 @@ mv "$MAP_DB.tmp" "$MAP_DB"
 
 grep -Fv "|$NAME|" "$PEERS_DB" > "$PEERS_DB.tmp" || true
 mv "$PEERS_DB.tmp" "$PEERS_DB"
+
+IKE_USERNAME=""
+if [ -f "$IKE_MAP" ]; then
+  IKE_USERNAME="$(awk -F'|' -v n="$NAME" '$3==n{print $4; exit}' "$IKE_MAP")"
+  awk -F'|' -v n="$NAME" '$3!=n' "$IKE_MAP" > "$IKE_MAP.tmp"
+  mv "$IKE_MAP.tmp" "$IKE_MAP"
+fi
+
+if [ -n "$IKE_USERNAME" ]; then
+  rm -f -- "/etc/ipsec.d/clients/$IKE_USERNAME.conf"
+  systemctl restart strongswan-starter 2>/dev/null || systemctl restart strongswan 2>/dev/null || true
+fi
 
 if wg show wg0 >/dev/null 2>&1; then
   wg syncconf wg0 <(wg-quick strip wg0)
@@ -1355,20 +1385,32 @@ set -euo pipefail
 
 BASE="/Wireguard"
 IKE_DIR="$BASE/ikev2"
-CLIENT_MAP="$BASE/maps/client_map.db"
 IKE_MAP="$BASE/maps/ikev2_map.db"
+EXITS_DIR="$BASE/exits"
 
 SLUG="$1"
 FINAL="$2"
 DIR="$3"
 
+[ -f "$EXITS_DIR/$SLUG.env" ] || { echo "Proxy exit not found: $SLUG"; exit 1; }
+mkdir -p "$DIR"
+
 SERVER_ID="$(cat "$IKE_DIR/server/server_id")"
 CA_CERT="$IKE_DIR/ca/caCert.pem"
 CA_KEY="$IKE_DIR/ca/caKey.pem"
 
-USERNAME="$(echo "$FINAL" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')"
+USERNAME="$(printf '%s' "$FINAL" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
+[ -n "$USERNAME" ] || USERNAME="ikev2-client"
 
-IP="10.9.0.$((RANDOM%200+2))"
+USED="$(awk -F'|' '{print $1}' "$IKE_MAP" | grep -Eo '10\.9\.0\.[0-9]+' | awk -F. '{print $4}' | sort -n | uniq || true)"
+IP=""
+for o in $(seq 2 254); do
+  if ! echo "$USED" | grep -qx "$o"; then
+    IP="10.9.0.$o"
+    break
+  fi
+done
+[ -n "$IP" ] || { echo "No IPs left in 10.9.0.0/24"; exit 1; }
 
 KEY="$DIR/$FINAL-ikev2-key.pem"
 CERT="$DIR/$FINAL-ikev2-cert.pem"
@@ -1382,6 +1424,8 @@ ipsec pki --gen --type rsa --size 2048 > "$KEY"
 ipsec pki --pub --in "$KEY" | ipsec pki --issue \
   --cacert "$CA_CERT" --cakey "$CA_KEY" \
   --dn "CN=$USERNAME" \
+  --san "$USERNAME" \
+  --flag clientAuth \
   --outform pem > "$CERT"
 
 openssl pkcs12 -export -inkey "$KEY" -in "$CERT" -certfile "$CA_CERT" \
@@ -1396,10 +1440,17 @@ conn ikev2-$USERNAME
     rightsourceip=$IP
 CONF
 
+printf '%s|%s|%s|%s\n' "$IP" "$SLUG" "$FINAL" "$USERNAME" >> "$IKE_MAP"
+
 systemctl restart strongswan-starter || systemctl restart strongswan
 
 CA_B64=$(openssl x509 -in "$CA_CERT" -outform der | base64 -w0)
 P12_B64=$(base64 -w0 "$P12")
+ROOT_UUID="$(uuidgen)"
+P12_UUID="$(uuidgen)"
+VPN_UUID="$(uuidgen)"
+PROFILE_UUID="$(uuidgen)"
+PROFILE_ID="com.waqaar.wireguard-proxy.${USERNAME}"
 
 cat > "$PROFILE" <<XML
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1407,30 +1458,51 @@ cat > "$PROFILE" <<XML
 <key>PayloadContent</key><array>
 
 <dict>
+<key>PayloadDisplayName</key><string>WireGuard Proxy CA</string>
+<key>PayloadIdentifier</key><string>$PROFILE_ID.ca</string>
+<key>PayloadUUID</key><string>$ROOT_UUID</string>
+<key>PayloadVersion</key><integer>1</integer>
 <key>PayloadType</key><string>com.apple.security.root</string>
 <key>PayloadContent</key><data>$CA_B64</data>
 </dict>
 
 <dict>
+<key>PayloadDisplayName</key><string>$FINAL Certificate</string>
+<key>PayloadIdentifier</key><string>$PROFILE_ID.certificate</string>
+<key>PayloadUUID</key><string>$P12_UUID</string>
+<key>PayloadVersion</key><integer>1</integer>
 <key>Password</key><string>$PASS</string>
 <key>PayloadType</key><string>com.apple.security.pkcs12</string>
 <key>PayloadContent</key><data>$P12_B64</data>
 </dict>
 
 <dict>
+<key>PayloadDisplayName</key><string>$FINAL VPN</string>
+<key>PayloadIdentifier</key><string>$PROFILE_ID.vpn</string>
+<key>PayloadUUID</key><string>$VPN_UUID</string>
+<key>PayloadVersion</key><integer>1</integer>
 <key>PayloadType</key><string>com.apple.vpn.managed</string>
 <key>UserDefinedName</key><string>$FINAL</string>
 <key>VPNType</key><string>IKEv2</string>
 <key>IKEv2</key>
 <dict>
 <key>AuthenticationMethod</key><string>Certificate</string>
+<key>PayloadCertificateUUID</key><string>$P12_UUID</string>
 <key>RemoteAddress</key><string>$SERVER_ID</string>
 <key>RemoteIdentifier</key><string>$SERVER_ID</string>
 <key>LocalIdentifier</key><string>$USERNAME</string>
 </dict>
 </dict>
 
-</array></dict></plist>
+</array>
+<key>PayloadDisplayName</key><string>$FINAL</string>
+<key>PayloadIdentifier</key><string>$PROFILE_ID.profile</string>
+<key>PayloadOrganization</key><string>Waqaar</string>
+<key>PayloadScope</key><string>System</string>
+<key>PayloadType</key><string>Configuration</string>
+<key>PayloadUUID</key><string>$PROFILE_UUID</string>
+<key>PayloadVersion</key><integer>1</integer>
+</dict></plist>
 XML
 
 echo "IKEv2 CREATED: $PROFILE"
@@ -1445,6 +1517,8 @@ iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o "$IFACE" -j MASQUERADE
 
 iptables -C INPUT -p udp --dport 500 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 500 -j ACCEPT
 iptables -C INPUT -p udp --dport 4500 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 4500 -j ACCEPT
+iptables -C FORWARD -s 10.9.0.0/24 -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -s 10.9.0.0/24 -j ACCEPT
+iptables -C FORWARD -d 10.9.0.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -d 10.9.0.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
 
 netfilter-persistent save >/dev/null 2>&1 || true
 
