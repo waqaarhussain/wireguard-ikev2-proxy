@@ -9,7 +9,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 
 apt update
-apt install -y wireguard wireguard-tools iptables iproute2 curl qrencode ca-certificates procps jq iptables-persistent python3
+apt install -y wireguard wireguard-tools iptables iproute2 curl ca-certificates procps jq iptables-persistent python3
 
 TMPDIR="$(mktemp -d)"
 cd "$TMPDIR"
@@ -29,6 +29,7 @@ SYSCTL
 sysctl --system >/dev/null
 
 mkdir -p /Wireguard/{server,client,maps,proxies,exits}
+mkdir -p /usr/local/lib/wireguard-proxy
 chmod 700 /Wireguard
 touch /Wireguard/maps/client_map.db
 touch /Wireguard/maps/peers.db
@@ -63,7 +64,7 @@ systemctl enable --now wg-quick@wg0
 
 echo "BASE DONE"
 
-cat >/usr/local/bin/build-routes <<'BUILD'
+cat >/usr/local/lib/wireguard-proxy/build-routes <<'BUILD'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -83,9 +84,9 @@ for f in "$EXITS_DIR"/*.env; do
   printf '%s|proxy|%s [%s]|%s|%s\n' "$SLUG" "$LABEL" "$TYPE_TAG" "$TUN" "$TABLE" >> "$EXITS_DB"
 done
 BUILD
-chmod +x /usr/local/bin/build-routes
+chmod +x /usr/local/lib/wireguard-proxy/build-routes
 
-cat >/usr/local/bin/apply-routing <<'APPLY'
+cat >/usr/local/lib/wireguard-proxy/apply-routing <<'APPLY'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -134,7 +135,7 @@ fi
 
 ip route flush cache
 APPLY
-chmod +x /usr/local/bin/apply-routing
+chmod +x /usr/local/lib/wireguard-proxy/apply-routing
 
 cat >/etc/systemd/system/singbox-exit@.service <<'SVC'
 [Unit]
@@ -528,7 +529,7 @@ write_proxy_json "$EXITS_DIR/$SLUG.env"
 /usr/local/bin/sing-box check -c "$PROXY_DIR/$SLUG.json"
 
 systemctl enable "singbox-exit@${SLUG}" >/dev/null 2>&1 || true
-/usr/local/bin/build-routes
+/usr/local/lib/wireguard-proxy/build-routes
 
 echo
 read -r -p "Start/restart this exit now? [y/N]: " RESTART
@@ -541,7 +542,7 @@ esac
 echo
 read -r -p "Create client? [y/N]: " CREATE
 case "${CREATE:-N}" in
-  y|Y) /usr/local/bin/new-client "$SLUG" ;;
+  y|Y) /usr/local/bin/new "$SLUG" ;;
 esac
 
 echo
@@ -550,7 +551,7 @@ echo "Slug: $SLUG"
 ADD
 chmod +x /usr/local/bin/add
 
-cat >/usr/local/bin/new-client <<'NEWCLIENT'
+cat >/usr/local/bin/new <<'NEWCLIENT'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -630,8 +631,7 @@ AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 WGCLIENT
 
-qrencode -t PNG -o "$DIR/$FINAL.png" < "$CONF"
-chmod 600 "$CONF" "$DIR/$FINAL.png"
+chmod 600 "$CONF"
 
 cat >> "$SERVER_CONF" <<WGPEER
 
@@ -651,20 +651,19 @@ else
   systemctl restart wg-quick@wg0
 fi
 
-/usr/local/bin/new-ikev2-profile "$SLUG" "$FINAL" "$DIR"
-/usr/local/bin/apply-routing
+/usr/local/lib/wireguard-proxy/new-ikev2-profile "$SLUG" "$FINAL" "$DIR"
+/usr/local/lib/wireguard-proxy/apply-routing
 
 echo
 echo "Client created:"
 echo "  $FINAL"
 echo "  $IP"
 echo "  $DIR/$FINAL.conf"
-echo "  $DIR/$FINAL.png"
 echo "  $DIR/$FINAL.mobileconfig"
 NEWCLIENT
-chmod +x /usr/local/bin/new-client
+chmod +x /usr/local/bin/new
 
-cat >/usr/local/bin/edit <<'EDIT'
+cat >/usr/local/lib/wireguard-proxy/edit-proxy <<'EDIT'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -949,14 +948,14 @@ chmod 600 "$ENV_FILE"
 
 write_proxy_json "$ENV_FILE"
 /usr/local/bin/sing-box check -c "$PROXY_DIR/$SLUG.json"
-/usr/local/bin/build-routes
+/usr/local/lib/wireguard-proxy/build-routes
 systemctl restart "singbox-exit@${SLUG}" || systemctl start "singbox-exit@${SLUG}"
 
 echo "Updated: $LABEL [$TYPE_TAG]"
 EDIT
-chmod +x /usr/local/bin/edit
+chmod +x /usr/local/lib/wireguard-proxy/edit-proxy
 
-cat >/usr/local/bin/remove <<'REMOVE'
+cat >/usr/local/lib/wireguard-proxy/remove-client <<'REMOVE'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -1005,8 +1004,10 @@ grep -Fv "|$NAME|" "$PEERS_DB" > "$PEERS_DB.tmp" || true
 mv "$PEERS_DB.tmp" "$PEERS_DB"
 
 IKE_USERNAME=""
+PROFILE_SHORT=""
 if [ -f "$IKE_MAP" ]; then
   IKE_USERNAME="$(awk -F'|' -v n="$NAME" '$3==n{print $4; exit}' "$IKE_MAP")"
+  PROFILE_SHORT="$(awk -F'|' -v n="$NAME" '$3==n{print $5; exit}' "$IKE_MAP")"
   awk -F'|' -v n="$NAME" '$3!=n' "$IKE_MAP" > "$IKE_MAP.tmp"
   mv "$IKE_MAP.tmp" "$IKE_MAP"
 fi
@@ -1016,20 +1017,24 @@ if [ -n "$IKE_USERNAME" ]; then
   systemctl restart strongswan-starter 2>/dev/null || systemctl restart strongswan 2>/dev/null || true
 fi
 
+if [ -n "$PROFILE_SHORT" ]; then
+  rm -f -- "/var/lib/wireguard-proxy-public/$PROFILE_SHORT"
+fi
+
 if wg show wg0 >/dev/null 2>&1; then
   wg syncconf wg0 <(wg-quick strip wg0)
 else
   systemctl restart wg-quick@wg0
 fi
 
-/usr/local/bin/apply-routing
+/usr/local/lib/wireguard-proxy/apply-routing
 rm -rf -- "$TARGET_DIR"
 
 echo "Removed: $NAME"
 REMOVE
-chmod +x /usr/local/bin/remove
+chmod +x /usr/local/lib/wireguard-proxy/remove-client
 
-cat >/usr/local/bin/check <<'CHECK'
+cat >/usr/local/lib/wireguard-proxy/check-clients <<'CHECK'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -1054,9 +1059,7 @@ else
 fi
 echo
 CHECK
-chmod +x /usr/local/bin/check
-
-ln -sf /usr/local/bin/new-client /usr/local/bin/new
+chmod +x /usr/local/lib/wireguard-proxy/check-clients
 
 echo "HELPERS DONE"
 
@@ -1064,8 +1067,8 @@ iptables -C INPUT -p udp --dport 51820 -j ACCEPT 2>/dev/null || iptables -I INPU
 iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 22 -j ACCEPT
 netfilter-persistent save >/dev/null 2>&1 || true
 
-/usr/local/bin/build-routes
-/usr/local/bin/apply-routing || true
+/usr/local/lib/wireguard-proxy/build-routes
+/usr/local/lib/wireguard-proxy/apply-routing || true
 
 cat >/usr/local/bin/bench <<'BENCH'
 #!/usr/bin/env bash
@@ -1283,14 +1286,14 @@ BENCH
 
 chmod +x /usr/local/bin/bench
 
-cat >/usr/local/bin/update <<'UPDATE'
+cat >/usr/local/lib/wireguard-proxy/update-routes <<'UPDATE'
 #!/usr/bin/env bash
 set -euo pipefail
-/usr/local/bin/build-routes
-/usr/local/bin/apply-routing
+/usr/local/lib/wireguard-proxy/build-routes
+/usr/local/lib/wireguard-proxy/apply-routing
 echo "Routes rebuilt and applied."
 UPDATE
-chmod +x /usr/local/bin/update
+chmod +x /usr/local/lib/wireguard-proxy/update-routes
 
 cat >/etc/systemd/system/wg-exit-update.service <<'SERVICE'
 [Unit]
@@ -1298,7 +1301,7 @@ Description=Rebuild and apply WireGuard proxy exit routes
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/update
+ExecStart=/usr/local/lib/wireguard-proxy/update-routes
 SERVICE
 
 cat >/etc/systemd/system/wg-exit-update.timer <<'TIMER'
@@ -1379,7 +1382,7 @@ echo ": RSA serverKey.pem" >/etc/ipsec.secrets
 
 systemctl restart strongswan-starter || systemctl restart strongswan
 
-cat >/usr/local/bin/new-ikev2-profile <<'IKE'
+cat >/usr/local/lib/wireguard-proxy/new-ikev2-profile <<'IKE'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -1439,8 +1442,6 @@ conn ikev2-$USERNAME
     rightid="$USERNAME"
     rightsourceip=$IP
 CONF
-
-printf '%s|%s|%s|%s\n' "$IP" "$SLUG" "$FINAL" "$USERNAME" >> "$IKE_MAP"
 
 systemctl restart strongswan-starter || systemctl restart strongswan
 
@@ -1505,10 +1506,25 @@ cat > "$PROFILE" <<XML
 </dict></plist>
 XML
 
-echo "IKEv2 CREATED: $PROFILE"
+PUBLIC_DIR="/var/lib/wireguard-proxy-public"
+mkdir -p "$PUBLIC_DIR"
+chmod 755 "$PUBLIC_DIR"
+
+LAST_NUMBER="$(find "$PUBLIC_DIR" -maxdepth 1 -type f -name 'p*.mobileconfig' -printf '%f\n' | sed -n 's/^p\([0-9][0-9]*\)\.mobileconfig$/\1/p' | sort -n | tail -n1)"
+LAST_NUMBER="${LAST_NUMBER:-0}"
+PROFILE_SHORT="p$((LAST_NUMBER + 1)).mobileconfig"
+install -m 644 "$PROFILE" "$PUBLIC_DIR/$PROFILE_SHORT"
+
+printf '%s|%s|%s|%s|%s\n' "$IP" "$SLUG" "$FINAL" "$USERNAME" "$PROFILE_SHORT" >> "$IKE_MAP"
+
+systemctl start wg-http
+
+echo
+echo "Apple TV / IKEv2 profile:"
+echo "  http://$SERVER_ID:8080/$PROFILE_SHORT"
 IKE
 
-chmod +x /usr/local/bin/new-ikev2-profile
+chmod +x /usr/local/lib/wireguard-proxy/new-ikev2-profile
 
 IFACE=$(ip route | awk '/default/ {print $5; exit}')
 
@@ -1523,7 +1539,7 @@ iptables -C FORWARD -d 10.9.0.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j
 netfilter-persistent save >/dev/null 2>&1 || true
 
 PORT=8080
-PUBLIC_DIR="/Wireguard/public"
+PUBLIC_DIR="/var/lib/wireguard-proxy-public"
 mkdir -p "$PUBLIC_DIR"
 chmod 755 "$PUBLIC_DIR"
 
@@ -1545,96 +1561,38 @@ WantedBy=multi-user.target
 SERVICE
 
 systemctl daemon-reload
-systemctl enable --now wg-http
-
-cat >/usr/local/bin/apple-tv <<'APP'
-#!/usr/bin/env bash
-set -euo pipefail
-
-ROOT="/Wireguard/client"
-PUBLIC_DIR="/Wireguard/public"
-PORT=8080
-IP="$(curl -4 -fsSL https://api.ipify.org)"
-
-find "$PUBLIC_DIR" -maxdepth 1 -type f -name 'p*.mobileconfig' -delete
-
-echo
-echo "Apple TV Profiles (SHORT LINKS):"
-echo
-
-i=1
-
-find "$ROOT" -type f -name "*.mobileconfig" | sort | while read -r f; do
-  name="$(basename "$f")"
-
-  short="p$i.mobileconfig"
-  install -m 644 "$f" "$PUBLIC_DIR/$short"
-
-  url="http://$IP:$PORT/$short"
-
-  echo "[$i] $name"
-  echo "    $url"
-  echo
-
-  i=$((i+1))
-done
-APP
-
-chmod +x /usr/local/bin/apple-tv
+systemctl enable wg-http
 
 iptables -C INPUT -p tcp --dport 8080 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 8080 -j ACCEPT
 netfilter-persistent save >/dev/null 2>&1 || true
 
-cat >/usr/local/bin/helpers <<'H'
+cat >/usr/local/bin/manage <<'MANAGE'
 #!/usr/bin/env bash
 set -euo pipefail
 
-HELPER_DIR="/usr/local/bin"
-SELF_NAME="helpers"
-
-mapfile -t AVAILABLE_CMDS < <(
-  find "$HELPER_DIR" -maxdepth 1 -type f -perm -111 -printf '%f\n' |
-  sort |
-  awk -v self="$SELF_NAME" '
-    $0 != self &&
-    $0 !~ /^(apply-routing|build-routes|sing-box|wg|wg-quick)$/ &&
-    $0 !~ /^(apt|apt-get|bash|sh|dash|ls|cat|cp|mv|rm|sed|awk|grep|find|sort|head|tail|chmod|chown|systemctl|journalctl|ip|curl|jq|python3|nano|vi|vim|less|more|scp|sftp|ssh|sshd|tar|gzip|gunzip|unzip|zip|tee|touch|mkdir|mktemp|env|printenv|xargs|dirname|basename|cut|tr|printf|echo|sleep|kill|pkill|pgrep|ps|du|df|mount|umount|ln|realpath)$/'
-)
-
-if [ "${#AVAILABLE_CMDS[@]}" -eq 0 ]; then
-  echo "No helpers found."
-  exit 1
-fi
-
 echo
-echo "Available helpers:"
-for i in "${!AVAILABLE_CMDS[@]}"; do
-  printf "  [%d] %s\n" "$((i+1))" "${AVAILABLE_CMDS[$i]}"
-done
-echo
+echo "Manage WireGuard / IKEv2 Proxy"
+echo "  [1] Edit a proxy"
+echo "  [2] Remove a client"
+echo "  [3] Check clients"
+echo "  [4] Reapply routes"
 echo "  [0] Cancel"
 echo
 
-read -r -p "Pick helper number: " choice
+read -r -p "Choice: " choice
 [[ "$choice" =~ ^[0-9]+$ ]] || { echo "Not a number."; exit 1; }
 
-if [ "$choice" -eq 0 ]; then
-  echo "Cancelled."
-  exit 0
-fi
+case "$choice" in
+  1) exec /usr/local/lib/wireguard-proxy/edit-proxy ;;
+  2) exec /usr/local/lib/wireguard-proxy/remove-client ;;
+  3) exec /usr/local/lib/wireguard-proxy/check-clients ;;
+  4) exec /usr/local/lib/wireguard-proxy/update-routes ;;
+  0) echo "Cancelled." ;;
+  *) echo "Invalid choice"; exit 1 ;;
+esac
+MANAGE
 
-(( choice >= 1 && choice <= ${#AVAILABLE_CMDS[@]} )) || { echo "Out of range."; exit 1; }
-
-CMD="${AVAILABLE_CMDS[$((choice-1))]}"
-
-echo
-echo "Running: $CMD"
-echo
-
-exec "$CMD"
-H
-
-chmod +x /usr/local/bin/helpers
+chmod +x /usr/local/bin/manage
 
 systemctl daemon-reload
 
@@ -1644,17 +1602,12 @@ echo
 echo "Helpers:"
 echo "  add"
 echo "  new"
-echo "  edit"
-echo "  remove"
-echo "  check"
+echo "  manage"
 echo "  bench"
-echo "  update"
-echo "  apple-tv"
-echo "  helpers"
 echo
 echo "Notes:"
 echo "  - Device DNS stays on the device."
 echo "  - Client configs do NOT include DNS lines."
 echo "  - 45.88.89.23 bypass stays direct."
-echo "  - check uses a 60-second active window."
+echo "  - new creates WireGuard and Apple IKEv2 profiles."
 echo
