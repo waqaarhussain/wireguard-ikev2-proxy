@@ -58,6 +58,26 @@ The installer downloads sing-box from its official GitHub release, installs the 
 
 This installer is intended for a fresh server. Do not rerun it on a configured server because it recreates `wg0.conf` and the IKEv2 certificate authority.
 
+## Main menu
+
+After installation, type:
+
+```bash
+helper
+```
+
+Select a numbered option to add a proxy, create a client, open management or benchmark exits. The menu returns after the selected command finishes, including when a command fails. Select `0` to exit. If you are not root, `helper` requests sudo access when you select a tool.
+
+### Add the menu to an existing server
+
+Install only the menu without rerunning the full VPN installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/waqaarhussain/wireguard-ikev2-proxy/main/helper.sh -o /tmp/wireguard-proxy-helper.sh && sudo install -m 755 /tmp/wireguard-proxy-helper.sh /usr/local/bin/helper && helper
+```
+
+This adds the launcher and leaves the existing VPN configuration, certificates, clients and proxies unchanged. The existing `add`, `new`, `manage` and `bench` commands must already be installed.
+
 ## First use
 
 Add a proxy exit:
@@ -115,10 +135,11 @@ Removing a client through `manage` also removes its published profile.
 
 ## Helper commands
 
-Only four public commands are installed:
+Use `helper` as the main menu, or run an individual command directly:
 
 | Command | Purpose |
 | --- | --- |
+| `helper` | Open the main menu for all four tools |
 | `add` | Add an HTTP, SOCKS5 or Shadowsocks proxy exit, with an option to create a client immediately |
 | `new` | Create WireGuard and Apple IKEv2 client profiles, apply proxy routing and print the Apple TV link |
 | `manage` | Edit a proxy, remove a client, check clients or manually reapply routes |
@@ -195,7 +216,7 @@ Client configurations do not contain a DNS setting. The connected device keeps i
 sudo systemctl status wg-quick@wg0 --no-pager
 sudo systemctl status strongswan-starter --no-pager
 sudo systemctl list-timers --all | grep wg-exit-update
-sudo check
+sudo manage # Choose 3 to check clients
 ```
 
 To inspect a specific proxy exit:
