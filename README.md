@@ -86,7 +86,7 @@ Add a proxy exit:
 sudo add
 ```
 
-Choose HTTP, SOCKS5 or Shadowsocks, then enter the proxy details.
+Choose HTTP, SOCKS5 or Shadowsocks, then enter the proxy details. Adding a proxy offers to create a client for that exit immediately. Existing clients keep their current configurations and proxy assignments.
 
 Create a client:
 
@@ -94,7 +94,9 @@ Create a client:
 sudo new
 ```
 
-Choose the proxy exit and enter a client name. The helper creates:
+Choose the proxy exit and enter a client name. The helper automatically creates both WireGuard and Apple IKEv2 profiles, then displays a compact, half-height WireGuard QR code and the Apple TV profile link together. Scan the QR in the WireGuard app. QR width and height depend on the configuration length and terminal font.
+
+The helper creates:
 
 - A WireGuard `.conf` file
 - An IKEv2 client certificate
@@ -108,6 +110,16 @@ Client files are stored in:
 ```text
 /Wireguard/client/CLIENT NAME/
 ```
+
+### Update client creation on an existing server
+
+Run this once to add the QR display and final Apple TV link summary. It replaces only the `new` command and installs the QR encoder. Existing VPN configurations, certificates, proxies and clients are preserved. Do not rerun the full installer.
+
+```bash
+sudo apt-get update && sudo apt-get install -y qrencode && curl -fsSL https://raw.githubusercontent.com/waqaarhussain/wireguard-ikev2-proxy/main/new-client.sh -o /tmp/wireguard-proxy-new-client.sh && sudo install -m 755 /tmp/wireguard-proxy-new-client.sh /usr/local/bin/new
+```
+
+Then run `helper` and choose **Create a client / Apple profile**. The existing IKEv2 profile helper must already be installed.
 
 ## Apple TV and Apple profile installation
 

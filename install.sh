@@ -9,7 +9,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 
 apt update
-apt install -y wireguard wireguard-tools iptables iproute2 curl ca-certificates procps jq iptables-persistent python3
+apt install -y wireguard wireguard-tools iptables iproute2 curl ca-certificates procps jq iptables-persistent python3 qrencode
 
 TMPDIR="$(mktemp -d)"
 cd "$TMPDIR"
@@ -651,15 +651,33 @@ else
   systemctl restart wg-quick@wg0
 fi
 
-/usr/local/lib/wireguard-proxy/new-ikev2-profile "$SLUG" "$FINAL" "$DIR"
+# Keep the Apple link for the final summary instead of burying it in setup output.
+if IKE_OUTPUT="$(/usr/local/lib/wireguard-proxy/new-ikev2-profile "$SLUG" "$FINAL" "$DIR")"; then
+  :
+else
+  status=$?
+  printf '%s\n' "$IKE_OUTPUT" >&2
+  echo "Apple profile creation failed (status $status)." >&2
+  exit "$status"
+fi
 /usr/local/lib/wireguard-proxy/apply-routing
 
 echo
-echo "Client created:"
-echo "  $FINAL"
-echo "  $IP"
-echo "  $DIR/$FINAL.conf"
-echo "  $DIR/$FINAL.mobileconfig"
+echo "Client created: $FINAL"
+echo "WireGuard config: $CONF"
+echo
+echo "WireGuard QR (scan in the WireGuard app):"
+if command -v qrencode >/dev/null 2>&1; then
+  # Half-height Unicode blocks keep the QR compact; retain its quiet border.
+  if ! qrencode -t ANSIUTF8 -l L -m 4 < "$CONF"; then
+    echo "QR unavailable. Import the saved WireGuard config instead." >&2
+  fi
+else
+  echo "QR unavailable. Install it with: sudo apt-get install -y qrencode" >&2
+fi
+
+# Always leave the Apple TV link visible below the QR, even if QR rendering fails.
+printf '%s\n' "$IKE_OUTPUT"
 NEWCLIENT
 chmod +x /usr/local/bin/new
 
