@@ -2,7 +2,7 @@
 
 A fresh Ubuntu VPS installer that lets WireGuard and IKEv2 clients use HTTP, SOCKS5 or Shadowsocks proxy exits stored on the server.
 
-Each client is assigned to one proxy exit. The VPS accepts the encrypted client connection, applies source-based routing and sends that client's traffic through the selected sing-box proxy tunnel.
+Each saved client can have a separate WireGuard and Apple IKEv2 profile for each proxy exit. Each profile is assigned to exactly one exit. The VPS accepts the encrypted client connection, applies source-based routing and sends that client's traffic through the selected sing-box proxy tunnel.
 
 ## What it installs
 
@@ -78,48 +78,68 @@ curl -fsSL https://raw.githubusercontent.com/waqaarhussain/wireguard-ikev2-proxy
 
 This adds the launcher and leaves the existing VPN configuration, certificates, clients and proxies unchanged. The existing `add`, `new`, `manage` and `bench` commands must already be installed.
 
+## Clients and proxy countries
+
+Save a client once, such as `Waqaar iPhone` or `Living Room Apple TV`. Its country profiles are separate connections with their own keys, addresses and routing. Installing another country profile does not replace an existing one.
+
+| Action | Result |
+| --- | --- |
+| Add a new proxy/country | Automatically generate WireGuard and Apple IKEv2 profiles for every saved client on that new exit |
+| Create a client | Enter the client name, then select one proxy or **All proxies** (the default) |
+| Create a client before adding any proxies | Save the name now; adding a proxy later generates its profiles |
+| Enter an existing client name again | Add missing profiles for the selected exits, reusing the saved client |
+| Manage > Sync missing profiles | Fill all missing client/proxy combinations; skip completed profiles |
+| Manage > Show saved profiles | Select a client and country to display its compact WireGuard QR and Apple TV link |
+| Manage > Remove a client | Remove the saved client and all its country profiles after confirmation |
+
+For example, if Alice and Bob already have UK profiles, adding France generates `Alice / France` and `Bob / France`. Their UK profiles, keys and installation links remain unchanged. Bulk creation prints the file locations and Apple TV links without filling the terminal with multiple QR codes. Use **Show saved profiles** to display a QR for one profile at a time.
+
+A client created for only one existing proxy receives profiles for future new proxies automatically. To backfill its other existing proxies, choose **Sync missing profiles**. Automatic sync runs when a proxy is added; it does not periodically recreate deleted files.
+
 ## First use
 
-Add a proxy exit:
-
-```bash
-sudo add
-```
-
-Choose HTTP, SOCKS5 or Shadowsocks, then enter the proxy details. Adding a proxy offers to create a client for that exit immediately. Existing clients keep their current configurations and proxy assignments.
-
-Create a client:
+Run `helper` and choose **Create a client / Apple profile**, or run:
 
 ```bash
 sudo new
 ```
 
-Choose the proxy exit and enter a client name. The helper automatically creates both WireGuard and Apple IKEv2 profiles, then displays a compact, half-height WireGuard QR code and the Apple TV profile link together. Scan the QR in the WireGuard app. QR width and height depend on the configuration length and terminal font.
+Enter the client name first. If proxies are available, choose one or press Enter for all. With no proxies, the name is saved for later.
 
-The helper creates:
-
-- A WireGuard `.conf` file
-- An IKEv2 client certificate
-- A password-protected PKCS#12 certificate
-- An Apple `.mobileconfig` profile
-- A short Apple TV installation link
-- WireGuard and IKEv2 source-routing entries for the selected proxy
-
-Client files are stored in:
-
-```text
-/Wireguard/client/CLIENT NAME/
-```
-
-### Update client creation on an existing server
-
-Run this once to add the QR display and final Apple TV link summary. It replaces only the `new` command and installs the QR encoder. Existing VPN configurations, certificates, proxies and clients are preserved. Do not rerun the full installer.
+Add a proxy using `helper` or:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y qrencode && curl -fsSL https://raw.githubusercontent.com/waqaarhussain/wireguard-ikev2-proxy/main/new-client.sh -o /tmp/wireguard-proxy-new-client.sh && sudo install -m 755 /tmp/wireguard-proxy-new-client.sh /usr/local/bin/new
+sudo add
 ```
 
-Then run `helper` and choose **Create a client / Apple profile**. The existing IKEv2 profile helper must already be installed.
+Choose HTTP, SOCKS5 or Shadowsocks, then enter the proxy details. After saving the exit, profiles for all saved clients are generated automatically. With no saved clients, the exit is saved and you can create a client later.
+
+Each client/proxy pair gets:
+
+- A WireGuard `.conf` file and independent server peer
+- An IKEv2 client certificate and password-protected PKCS#12 certificate
+- An Apple `.mobileconfig` profile and short Apple TV installation link
+- WireGuard and IKEv2 source-routing entries for that proxy
+
+For a single profile, the final output displays a half-height WireGuard QR and the Apple TV link. Scan the QR in the WireGuard app. QR dimensions depend on the configuration length and terminal font.
+
+Profile files retain the existing folder layout:
+
+```text
+/Wireguard/client/CLIENT - [TYPE - COUNTRY]/
+```
+
+### Update an existing server
+
+Run the helper updater, **not the full VPN installer**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/waqaarhussain/wireguard-ikev2-proxy/main/update-helpers.sh -o /tmp/wireguard-proxy-update-helpers.sh && sudo bash /tmp/wireguard-proxy-update-helpers.sh
+```
+
+The updater downloads the helper tools from a single GitHub revision, checks their syntax, installs `qrencode`, backs up the previous helper tools in `/var/backups`, and imports existing clients in place. Legacy names such as `Alice - [S5 - UK]` and `Alice - [S5 - France]` are grouped under `Alice`. Existing profile files, keys and the VPN certificate authority are preserved. Then it fills any missing client/proxy combinations. It does not create a new proxy or replace completed profiles.
+
+If a creation attempt fails, its saved client remains registered. **Sync missing profiles** retries the incomplete pair while reusing an already-created WireGuard config. A missing file belonging to an existing mapped profile is reported for restoration from backup rather than silently changing its keys. The sync checks address capacity before a bulk run. The current subnets provide 253 profile addresses each, from `.2` to `.254`; each client/proxy pair consumes one address in each subnet.
 
 ## Apple TV and Apple profile installation
 
@@ -143,7 +163,7 @@ The published profile remains in `/var/lib/wireguard-proxy-public`. To use the s
 sudo systemctl start wg-http
 ```
 
-Removing a client through `manage` also removes its published profile.
+Removing a client through `manage` removes all of its country profiles and their published downloads. **Show saved profiles** restarts the profile web server if needed and republishes a missing download from the saved local profile.
 
 ## Helper commands
 
@@ -152,9 +172,9 @@ Use `helper` as the main menu, or run an individual command directly:
 | Command | Purpose |
 | --- | --- |
 | `helper` | Open the main menu for all four tools |
-| `add` | Add an HTTP, SOCKS5 or Shadowsocks proxy exit, with an option to create a client immediately |
-| `new` | Create WireGuard and Apple IKEv2 client profiles, apply proxy routing and print the Apple TV link |
-| `manage` | Edit a proxy, remove a client, check clients or manually reapply routes |
+| `add` | Add a proxy exit and automatically create its profiles for all saved clients |
+| `new` | Save a client and create WireGuard/Apple profiles for one or all exits |
+| `manage` | Edit proxies, remove clients, check profiles, apply routes, sync missing profiles or view QR codes and Apple links |
 | `bench` | Benchmark all exits or filter by proxy type |
 
 Route building, profile publishing and the three-minute refresh timer run internally and do not add extra user commands.
@@ -202,6 +222,7 @@ TCP port `8080` is optional after Apple profiles have been installed.
 | `/Wireguard/client` | Generated client configurations and profiles |
 | `/Wireguard/exits` | Root-only proxy definitions and credentials |
 | `/Wireguard/proxies` | Generated sing-box configuration files |
+| `/Wireguard/maps/clients.json` | Saved client names, including clients with no profiles yet |
 | `/Wireguard/maps/client_map.db` | WireGuard client-to-exit mappings |
 | `/Wireguard/maps/ikev2_map.db` | IKEv2 client-to-exit mappings |
 | `/Wireguard/ikev2` | IKEv2 CA, server certificate and client assets |
@@ -220,7 +241,7 @@ Client configurations do not contain a DNS setting. The connected device keeps i
 - Apple profiles contain sensitive client credentials. Do not leave TCP port `8080` open unnecessarily.
 - The profile server uses HTTP rather than HTTPS. Use it only for short-lived installation on a network you trust.
 - Back up `/Wireguard` before replacing or rebuilding the VPS.
-- Removing a client deletes its active WireGuard peer, IKEv2 identity and route mappings.
+- Removing a saved client deletes all its WireGuard peers, IKEv2 identities and route mappings across countries.
 
 ## Basic checks
 
